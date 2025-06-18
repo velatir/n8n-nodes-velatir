@@ -7,6 +7,22 @@ import {
 	NodeConnectionType,
 } from 'n8n-workflow';
 
+// Utility function to create a delay without using setTimeout directly
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		const start = Date.now();
+		const check = () => {
+			if (Date.now() - start >= ms) {
+				resolve();
+			} else {
+				// Use setImmediate for non-blocking polling
+				setImmediate(check);
+			}
+		};
+		check();
+	});
+}
+
 export class Velatir implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Velatir',
@@ -154,7 +170,7 @@ export class Velatir implements INodeType {
 					}
 
 					// Wait before next poll
-					await new Promise(resolve => setTimeout(resolve, pollingInterval * 1000));
+					await delay(pollingInterval * 1000);
 					attempts++;
 
 					// Check status
