@@ -1,0 +1,22 @@
+# Source files
+src/
+tsconfig.json
+.eslintrc.js
+.eslintignore
+gulpfile.js
+
+# Development files
+node_modules/
+*.log
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts (keep dist/ in npm package)
+*.tsbuildinfo

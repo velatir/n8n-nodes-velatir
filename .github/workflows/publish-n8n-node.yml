@@ -1,0 +1,80 @@
+name: Publish n8n Node
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  publish-n8n-node:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: |
+          npm ci
+
+      - name: Run linting
+        run: |
+          npm run lint
+
+      - name: Build package
+        run: |
+          npm run build
+
+      - name: Update version (if manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          npm version ${{ github.event.inputs.version }} --no-git-tag-version
+
+      - name: Extract version from tag (if tag trigger)
+        if: github.event_name == 'push'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/n8n-v}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          npm version $VERSION --no-git-tag-version
+
+      - name: Verify n8n node structure
+        run: |
+          echo "Verifying n8n node package structure..."
+          # Check required files exist
+          test -f dist/nodes/Velatir/Velatir.node.js || (echo "Missing Velatir.node.js" && exit 1)
+          test -f dist/credentials/VelatirApi.credentials.js || (echo "Missing VelatirApi.credentials.js" && exit 1)
+          test -f dist/nodes/Velatir/velatir.svg || (echo "Missing velatir.svg" && exit 1)
+          
+          # Check package.json has required n8n fields
+          node -e "
+            const pkg = require('./package.json');
+            if (!pkg.n8n) throw new Error('Missing n8n field in package.json');
+            if (!pkg.n8n.nodes || !pkg.n8n.credentials) throw new Error('Missing n8n.nodes or n8n.credentials');
+            if (!pkg.keywords.includes('n8n-community-node-package')) throw new Error('Missing n8n-community-node-package keyword');
+            console.log('✅ n8n package structure is valid');
+          "
+
+      - name: Publish to npm
+        run: |
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

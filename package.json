@@ -1,0 +1,64 @@
+{
+  "name": "n8n-nodes-velatir",
+  "version": "1.0.0",
+  "description": "n8n community node for Velatir - Human-in-the-loop AI function approval",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "velatir",
+    "human-in-the-loop",
+    "ai",
+    "approval",
+    "workflow"
+  ],
+  "license": "MIT",
+  "homepage": "https://www.velatir.com",
+  "author": {
+    "name": "Velatir",
+    "email": "hello@velatir.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/velatir/n8n-nodes-velatir/"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "packageManager": "npm@9.6.7",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && gulp build:icons",
+    "dev": "tsc --watch",
+    "format": "prettier --write . --ignore-path .gitignore",
+    "lint": "eslint . --ext .ts --ignore-path .eslintignore",
+    "lintfix": "eslint . --ext .ts --fix --ignore-path .eslintignore",
+    "prepublishOnly": "npm run build && npm run lint -s"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/VelatirApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Velatir/Velatir.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.6",
+    "@types/node": "^20.8.10",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.42.0",
+    "eslint-plugin-n8n-nodes-base": "^1.11.0",
+    "gulp": "^4.0.2",
+    "n8n-workflow": "*",
+    "prettier": "^2.7.1",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}
