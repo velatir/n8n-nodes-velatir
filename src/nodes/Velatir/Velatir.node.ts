@@ -116,7 +116,7 @@ export class Velatir implements INodeType {
 				// Create the watch request
 				const createResponse = await this.helpers.httpRequest.call(this, {
 					method: 'POST',
-					url: 'https://api.velatir.com/api/v1/watches',
+					url: `${credentials.domain}/api/v1/watches`,
 					body: requestBody,
 					json: true,
 					headers: {
@@ -176,7 +176,7 @@ export class Velatir implements INodeType {
 					// Check status
 					const statusResponse = await this.helpers.httpRequest.call(this, {
 						method: 'GET',
-						url: `https://api.velatir.com/api/v1/watches/${requestId}`,
+						url: `${credentials.domain}/api/v1/watches/${requestId}`,
 						json: true,
 						headers: {
 							'X-API-Key': credentials.apiKey as string,

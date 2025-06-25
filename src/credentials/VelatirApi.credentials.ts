@@ -1,5 +1,6 @@
 import {
 	IAuthenticateGeneric,
+	ICredentialTestRequest,
 	ICredentialType,
 	INodeProperties,
 } from 'n8n-workflow';
@@ -18,6 +19,12 @@ export class VelatirApi implements ICredentialType {
 			required: true,
 			description: 'Your Velatir API key. You can find this in your Velatir dashboard.',
 		},
+		{
+			displayName: 'Domain',
+			name: 'domain',
+			type: 'string',
+			default: 'https://api.velatir.com',
+		}
 	];
 
 	// Configure authentication method
@@ -27,6 +34,13 @@ export class VelatirApi implements ICredentialType {
 			headers: {
 				'X-API-Key': '={{$credentials.apiKey}}',
 			},
+		},
+	};
+
+	test: ICredentialTestRequest = {
+		request: {
+			baseURL: '={{$credentials?.domain}}',
+			url: '/api/v1/project',
 		},
 	};
 }
