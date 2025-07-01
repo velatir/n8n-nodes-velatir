@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-velatir",
-  "version": "1.0.1",
+  "version": "0.0.0",
   "description": "n8n community node for Velatir - Human-in-the-loop AI function approval",
   "keywords": [
     "n8n-community-node-package",
