@@ -159,6 +159,7 @@ export class Velatir implements INodeType {
 				// Wait for approval (polling)
 				let attempts = 0;
 				let finalState = initialState;
+				let reason = "";
 
 				while (finalState === 'pending') {
 					if (maxAttempts > 0 && attempts >= maxAttempts) {
@@ -185,6 +186,7 @@ export class Velatir implements INodeType {
 					});
 
 					finalState = statusResponse.state;
+					reason = statusResponse.result?.reason ?? "No reason provided";
 				}
 
 				// Handle final decision
@@ -193,10 +195,10 @@ export class Velatir implements INodeType {
 						json: inputData, // Pass through original data unchanged
 						pairedItem: { item: i },
 					});
-				} else if (finalState === 'denied') {
+				} else if (finalState === 'declined') {
 					throw new NodeOperationError(
 						this.getNode(),
-						`Request was denied by Velatir approver (request_id: ${requestId})`,
+						`Request was denied by Velatir (reason: ${reason}, request_id: ${requestId})`,
 						{ itemIndex: i }
 					);
 				} else {
