@@ -52,7 +52,7 @@ jobs:
       - name: Extract version from tag (if tag trigger)
         if: github.event_name == 'push'
         run: |
-          VERSION=${GITHUB_REF#refs/tags/n8n-v}
+          VERSION=${GITHUB_REF#refs/tags/}
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           npm version $VERSION --no-git-tag-version
 
