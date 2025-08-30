@@ -35,7 +35,8 @@ export class Velatir implements INodeType {
 			name: 'Velatir',
 		},
 		inputs: [NodeConnectionType.Main],
-		outputs: [NodeConnectionType.Main],
+		outputs: [NodeConnectionType.Main, NodeConnectionType.Main, NodeConnectionType.Main],
+		outputNames: ['Approved', 'Declined', 'Change Requested'],
 		credentials: [
 			{
 				name: 'velatirApi',
@@ -43,6 +44,25 @@ export class Velatir implements INodeType {
 			},
 		],
 		properties: [
+			{
+				displayName: 'Behavior Mode',
+				name: 'behaviorMode',
+				type: 'options',
+				options: [
+					{
+						name: 'Wait for Approval (Fail if Denied)',
+						value: 'approval_only',
+						description: 'Traditional behavior: continue on approval, fail on decline/change request',
+					},
+					{
+						name: 'Route Based on Decision',
+						value: 'route_decision',
+						description: 'Route to different outputs based on approval decision',
+					},
+				],
+				default: 'approval_only',
+				description: 'How the node should behave based on the approval decision',
+			},
 			{
 				displayName: 'Function Name',
 				name: 'functionName',
@@ -80,17 +100,30 @@ export class Velatir implements INodeType {
 					minValue: 0,
 				},
 			},
+			{
+				displayName: 'LLM Explanation',
+				name: 'llmExplanation',
+				type: 'string',
+				default: '',
+				description: 'Optional explanation from AI about why this approval is needed',
+				placeholder: 'This action requires approval because...',
+			},
 		],
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
-		const returnData: INodeExecutionData[] = [];
-
+		const behaviorMode = this.getNodeParameter('behaviorMode', 0) as string;
 		const functionName = this.getNodeParameter('functionName', 0) as string;
 		const description = this.getNodeParameter('description', 0) as string;
 		const pollingInterval = this.getNodeParameter('pollingInterval', 0) as number;
 		const timeoutMinutes = this.getNodeParameter('timeoutMinutes', 0) as number;
+		const llmExplanation = this.getNodeParameter('llmExplanation', 0) as string;
+
+		// Initialize return data arrays for different output modes
+		const approvedData: INodeExecutionData[] = [];
+		const declinedData: INodeExecutionData[] = [];
+		const changeRequestedData: INodeExecutionData[] = [];
 
 		const maxAttempts = timeoutMinutes > 0 ? Math.ceil((timeoutMinutes * 60) / pollingInterval) : 0;
 
@@ -99,24 +132,26 @@ export class Velatir implements INodeType {
 				const inputData = items[i].json;
 				const credentials = await this.getCredentials('velatirApi');
 
-				// Create watch request with input data as arguments
+				// Create review task request with input data as arguments
 				const requestBody = {
-					functionname: functionName || `Step ${i + 1}`,
+					functionName: functionName || `Step ${i + 1}`,
 					args: inputData,
 					doc: description || `Approve data processing in n8n workflow`,
+					llmExplanation: llmExplanation || undefined,
 					metadata: {
 						nodeType: 'n8n-velatir-gate',
 						workflowId: this.getWorkflow().id,
 						executionId: this.getExecutionId(),
 						nodeId: this.getNode().id,
 						itemIndex: i,
+						behaviorMode: behaviorMode,
 					},
 				};
 
-				// Create the watch request
+				// Create the review task request
 				const createResponse = await this.helpers.httpRequest.call(this, {
 					method: 'POST',
-					url: `${credentials.domain}/api/v1/watches`,
+					url: `${credentials.domain}/api/v1/review-tasks`,
 					body: requestBody,
 					json: true,
 					headers: {
@@ -127,7 +162,7 @@ export class Velatir implements INodeType {
 				});
 
 				// API returns data directly in response body
-				if (!createResponse || !createResponse.requestId) {
+				if (!createResponse || !createResponse.reviewTaskId) {
 					throw new NodeOperationError(
 						this.getNode(),
 						`Invalid API response: ${JSON.stringify(createResponse)}`,
@@ -135,37 +170,66 @@ export class Velatir implements INodeType {
 					);
 				}
 
-				const requestId = createResponse.requestId;
+				const reviewTaskId = createResponse.reviewTaskId;
 				const initialState = createResponse.state;
 
-				// If already approved, return immediately
+				// If already approved, handle based on behavior mode
 				if (initialState === 'approved') {
-					returnData.push({
-						json: inputData, // Pass through original data unchanged
+					const outputData = {
+						json: {
+							...inputData,
+							_velatir: {
+								reviewTaskId,
+								state: 'approved',
+								behaviorMode,
+							}
+						},
+						pairedItem: { item: i },
+					};
+
+					if (behaviorMode === 'route_decision') {
+						approvedData.push(outputData);
+					} else {
+						approvedData.push(outputData);
+					}
+					continue;
+				}
+
+				// If declined in approval_only mode, throw error
+				if (initialState === 'declined' && behaviorMode === 'approval_only') {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Request was declined by Velatir approver (reviewTaskId: ${reviewTaskId})`,
+						{ itemIndex: i }
+					);
+				}
+
+				// If declined in route_decision mode, add to declined output
+				if (initialState === 'declined' && behaviorMode === 'route_decision') {
+					declinedData.push({
+						json: {
+							...inputData,
+							_velatir: {
+								reviewTaskId,
+								state: 'declined',
+								behaviorMode,
+							}
+						},
 						pairedItem: { item: i },
 					});
 					continue;
 				}
 
-				// If denied, throw error
-				if (initialState === 'denied') {
-					throw new NodeOperationError(
-						this.getNode(),
-						`Request was denied by Velatir approver (request_id: ${requestId})`,
-						{ itemIndex: i }
-					);
-				}
-
 				// Wait for approval (polling)
 				let attempts = 0;
 				let finalState = initialState;
-				let reason = "";
+				let requestedChange = "";
 
 				while (finalState === 'pending') {
 					if (maxAttempts > 0 && attempts >= maxAttempts) {
 						throw new NodeOperationError(
 							this.getNode(),
-							`Approval timeout after ${timeoutMinutes} minutes (request_id: ${requestId})`,
+							`Approval timeout after ${timeoutMinutes} minutes (reviewTaskId: ${reviewTaskId})`,
 							{ itemIndex: i }
 						);
 					}
@@ -177,7 +241,7 @@ export class Velatir implements INodeType {
 					// Check status
 					const statusResponse = await this.helpers.httpRequest.call(this, {
 						method: 'GET',
-						url: `${credentials.domain}/api/v1/watches/${requestId}`,
+						url: `${credentials.domain}/api/v1/review-tasks/${reviewTaskId}`,
 						json: true,
 						headers: {
 							'X-API-Key': credentials.apiKey as string,
@@ -186,41 +250,85 @@ export class Velatir implements INodeType {
 					});
 
 					finalState = statusResponse.state;
-					reason = statusResponse.result?.reason ?? "No reason provided";
+					requestedChange = statusResponse.requestedChange ?? "";
 				}
 
-				// Handle final decision
+				// Handle final decision based on behavior mode
+				const outputData = {
+					json: {
+						...inputData,
+						_velatir: {
+							reviewTaskId,
+							state: finalState,
+							requestedChange,
+							behaviorMode,
+						}
+					},
+					pairedItem: { item: i },
+				};
+
 				if (finalState === 'approved') {
-					returnData.push({
-						json: inputData, // Pass through original data unchanged
-						pairedItem: { item: i },
-					});
+					approvedData.push(outputData);
 				} else if (finalState === 'declined') {
-					throw new NodeOperationError(
-						this.getNode(),
-						`Request was denied by Velatir (reason: ${reason}, request_id: ${requestId})`,
-						{ itemIndex: i }
-					);
+					if (behaviorMode === 'approval_only') {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Request was declined by Velatir (reason: ${requestedChange || 'No reason provided'}, reviewTaskId: ${reviewTaskId})`,
+							{ itemIndex: i }
+						);
+					} else {
+						declinedData.push(outputData);
+					}
+				} else if (finalState === 'change_requested') {
+					if (behaviorMode === 'approval_only') {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Changes requested by Velatir (reason: ${requestedChange || 'No reason provided'}, reviewTaskId: ${reviewTaskId})`,
+							{ itemIndex: i }
+						);
+					} else {
+						changeRequestedData.push(outputData);
+					}
 				} else {
 					throw new NodeOperationError(
 						this.getNode(),
-						`Unexpected state: ${finalState} (request_id: ${requestId})`,
+						`Unexpected state: ${finalState} (reviewTaskId: ${reviewTaskId})`,
 						{ itemIndex: i }
 					);
 				}
 
 			} catch (error) {
 				if (this.continueOnFail()) {
-					returnData.push({
-						json: { error: error instanceof Error ? error.message : 'Unknown error' },
+					const errorData = {
+						json: { 
+							error: error instanceof Error ? error.message : 'Unknown error',
+							_velatir: {
+								state: 'error',
+								behaviorMode,
+							}
+						},
 						pairedItem: { item: i },
-					});
+					};
+					
+					// Add error to appropriate output in route_decision mode
+					if (behaviorMode === 'route_decision') {
+						declinedData.push(errorData);
+					} else {
+						approvedData.push(errorData);
+					}
 					continue;
 				}
 				throw error;
 			}
 		}
 
-		return [returnData];
+		// Return data based on behavior mode
+		if (behaviorMode === 'route_decision') {
+			return [approvedData, declinedData, changeRequestedData];
+		} else {
+			// In approval_only mode, only return approved data through first output
+			// Other outputs will be empty
+			return [approvedData, [], []];
+		}
 	}
 }
