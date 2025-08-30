@@ -152,8 +152,11 @@ export class Velatir implements INodeType {
 				const reviewTaskId = createResponse.reviewTaskId;
 				const initialState = createResponse.state;
 
+				// Check initial state (case insensitive)
+				const normalizedInitialState = initialState.toLowerCase();
+				
 				// If already approved, route to approved output
-				if (initialState === 'approved') {
+				if (normalizedInitialState === 'approved') {
 					approvedData.push({
 						json: {
 							...inputData,
@@ -167,8 +170,8 @@ export class Velatir implements INodeType {
 					continue;
 				}
 
-				// If declined, route to declined output
-				if (initialState === 'declined') {
+				// If rejected, route to declined output
+				if (normalizedInitialState === 'rejected') {
 					declinedData.push({
 						json: {
 							...inputData,
@@ -183,7 +186,7 @@ export class Velatir implements INodeType {
 				}
 
 				// If change requested, route to change requested output
-				if (initialState === 'change_requested') {
+				if (normalizedInitialState === 'changerequested') {
 					changeRequestedData.push({
 						json: {
 							...inputData,
@@ -203,7 +206,8 @@ export class Velatir implements INodeType {
 				let finalState = initialState;
 				let requestedChange = "";
 
-				while (finalState === 'pending') {
+				// Continue polling while in non-final states
+				while (['pending', 'processing', 'requiresintervention'].includes(finalState.toLowerCase())) {
 					if (maxAttempts > 0 && attempts >= maxAttempts) {
 						throw new NodeOperationError(
 							this.getNode(),
@@ -231,8 +235,9 @@ export class Velatir implements INodeType {
 					requestedChange = statusResponse.requestedChange ?? "";
 				}
 
-				// Handle final decision by routing to appropriate output
-				if (finalState === 'approved') {
+				// Handle final decision by routing to appropriate output (case insensitive)
+				const normalizedState = finalState.toLowerCase();
+				if (normalizedState === 'approved') {
 					approvedData.push({
 						json: {
 							...inputData,
@@ -244,7 +249,7 @@ export class Velatir implements INodeType {
 						},
 						pairedItem: { item: i },
 					});
-				} else if (finalState === 'declined') {
+				} else if (normalizedState === 'rejected') {
 					declinedData.push({
 						json: {
 							...inputData,
@@ -256,7 +261,7 @@ export class Velatir implements INodeType {
 						},
 						pairedItem: { item: i },
 					});
-				} else if (finalState === 'change_requested') {
+				} else if (normalizedState === 'changerequested') {
 					changeRequestedData.push({
 						json: {
 							...inputData,
@@ -269,11 +274,19 @@ export class Velatir implements INodeType {
 						pairedItem: { item: i },
 					});
 				} else {
-					throw new NodeOperationError(
-						this.getNode(),
-						`Unexpected state: ${finalState} (reviewTaskId: ${reviewTaskId})`,
-						{ itemIndex: i }
-					);
+					// Handle any other unexpected states by logging and routing to declined
+					declinedData.push({
+						json: {
+							...inputData,
+							error: `Unexpected approval state: ${finalState}`,
+							_velatir: {
+								reviewTaskId,
+								state: finalState,
+								requestedChange,
+							}
+						},
+						pairedItem: { item: i },
+					});
 				}
 
 			} catch (error) {
