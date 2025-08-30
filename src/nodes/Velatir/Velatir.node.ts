@@ -30,7 +30,7 @@ export class Velatir implements INodeType {
 		icon: 'file:velatir.svg',
 		group: ['transform'],
 		version: 1,
-		description: 'Human approval gate - pauses workflow until approved by a human',
+		description: 'Human approval gate with decision routing - routes workflow based on approval decision',
 		defaults: {
 			name: 'Velatir',
 		},
@@ -44,25 +44,6 @@ export class Velatir implements INodeType {
 			},
 		],
 		properties: [
-			{
-				displayName: 'Behavior Mode',
-				name: 'behaviorMode',
-				type: 'options',
-				options: [
-					{
-						name: 'Wait for Approval (Fail if Denied)',
-						value: 'approval_only',
-						description: 'Traditional behavior: continue on approval, fail on decline/change request',
-					},
-					{
-						name: 'Route Based on Decision',
-						value: 'route_decision',
-						description: 'Route to different outputs based on approval decision',
-					},
-				],
-				default: 'approval_only',
-				description: 'How the node should behave based on the approval decision',
-			},
 			{
 				displayName: 'Function Name',
 				name: 'functionName',
@@ -113,14 +94,13 @@ export class Velatir implements INodeType {
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
-		const behaviorMode = this.getNodeParameter('behaviorMode', 0) as string;
 		const functionName = this.getNodeParameter('functionName', 0) as string;
 		const description = this.getNodeParameter('description', 0) as string;
 		const pollingInterval = this.getNodeParameter('pollingInterval', 0) as number;
 		const timeoutMinutes = this.getNodeParameter('timeoutMinutes', 0) as number;
 		const llmExplanation = this.getNodeParameter('llmExplanation', 0) as string;
 
-		// Initialize return data arrays for different output modes
+		// Initialize return data arrays for routing
 		const approvedData: INodeExecutionData[] = [];
 		const declinedData: INodeExecutionData[] = [];
 		const changeRequestedData: INodeExecutionData[] = [];
@@ -144,7 +124,6 @@ export class Velatir implements INodeType {
 						executionId: this.getExecutionId(),
 						nodeId: this.getNode().id,
 						itemIndex: i,
-						behaviorMode: behaviorMode,
 					},
 				};
 
@@ -173,46 +152,45 @@ export class Velatir implements INodeType {
 				const reviewTaskId = createResponse.reviewTaskId;
 				const initialState = createResponse.state;
 
-				// If already approved, handle based on behavior mode
+				// If already approved, route to approved output
 				if (initialState === 'approved') {
-					const outputData = {
+					approvedData.push({
 						json: {
 							...inputData,
 							_velatir: {
 								reviewTaskId,
 								state: 'approved',
-								behaviorMode,
 							}
 						},
 						pairedItem: { item: i },
-					};
-
-					if (behaviorMode === 'route_decision') {
-						approvedData.push(outputData);
-					} else {
-						approvedData.push(outputData);
-					}
+					});
 					continue;
 				}
 
-				// If declined in approval_only mode, throw error
-				if (initialState === 'declined' && behaviorMode === 'approval_only') {
-					throw new NodeOperationError(
-						this.getNode(),
-						`Request was declined by Velatir approver (reviewTaskId: ${reviewTaskId})`,
-						{ itemIndex: i }
-					);
-				}
-
-				// If declined in route_decision mode, add to declined output
-				if (initialState === 'declined' && behaviorMode === 'route_decision') {
+				// If declined, route to declined output
+				if (initialState === 'declined') {
 					declinedData.push({
 						json: {
 							...inputData,
 							_velatir: {
 								reviewTaskId,
 								state: 'declined',
-								behaviorMode,
+							}
+						},
+						pairedItem: { item: i },
+					});
+					continue;
+				}
+
+				// If change requested, route to change requested output
+				if (initialState === 'change_requested') {
+					changeRequestedData.push({
+						json: {
+							...inputData,
+							_velatir: {
+								reviewTaskId,
+								state: 'change_requested',
+								requestedChange: '',
 							}
 						},
 						pairedItem: { item: i },
@@ -253,42 +231,43 @@ export class Velatir implements INodeType {
 					requestedChange = statusResponse.requestedChange ?? "";
 				}
 
-				// Handle final decision based on behavior mode
-				const outputData = {
-					json: {
-						...inputData,
-						_velatir: {
-							reviewTaskId,
-							state: finalState,
-							requestedChange,
-							behaviorMode,
-						}
-					},
-					pairedItem: { item: i },
-				};
-
+				// Handle final decision by routing to appropriate output
 				if (finalState === 'approved') {
-					approvedData.push(outputData);
+					approvedData.push({
+						json: {
+							...inputData,
+							_velatir: {
+								reviewTaskId,
+								state: 'approved',
+								requestedChange,
+							}
+						},
+						pairedItem: { item: i },
+					});
 				} else if (finalState === 'declined') {
-					if (behaviorMode === 'approval_only') {
-						throw new NodeOperationError(
-							this.getNode(),
-							`Request was declined by Velatir (reason: ${requestedChange || 'No reason provided'}, reviewTaskId: ${reviewTaskId})`,
-							{ itemIndex: i }
-						);
-					} else {
-						declinedData.push(outputData);
-					}
+					declinedData.push({
+						json: {
+							...inputData,
+							_velatir: {
+								reviewTaskId,
+								state: 'declined',
+								requestedChange,
+							}
+						},
+						pairedItem: { item: i },
+					});
 				} else if (finalState === 'change_requested') {
-					if (behaviorMode === 'approval_only') {
-						throw new NodeOperationError(
-							this.getNode(),
-							`Changes requested by Velatir (reason: ${requestedChange || 'No reason provided'}, reviewTaskId: ${reviewTaskId})`,
-							{ itemIndex: i }
-						);
-					} else {
-						changeRequestedData.push(outputData);
-					}
+					changeRequestedData.push({
+						json: {
+							...inputData,
+							_velatir: {
+								reviewTaskId,
+								state: 'change_requested',
+								requestedChange,
+							}
+						},
+						pairedItem: { item: i },
+					});
 				} else {
 					throw new NodeOperationError(
 						this.getNode(),
@@ -299,36 +278,23 @@ export class Velatir implements INodeType {
 
 			} catch (error) {
 				if (this.continueOnFail()) {
-					const errorData = {
+					// Route errors to declined output
+					declinedData.push({
 						json: { 
 							error: error instanceof Error ? error.message : 'Unknown error',
 							_velatir: {
 								state: 'error',
-								behaviorMode,
 							}
 						},
 						pairedItem: { item: i },
-					};
-					
-					// Add error to appropriate output in route_decision mode
-					if (behaviorMode === 'route_decision') {
-						declinedData.push(errorData);
-					} else {
-						approvedData.push(errorData);
-					}
+					});
 					continue;
 				}
 				throw error;
 			}
 		}
 
-		// Return data based on behavior mode
-		if (behaviorMode === 'route_decision') {
-			return [approvedData, declinedData, changeRequestedData];
-		} else {
-			// In approval_only mode, only return approved data through first output
-			// Other outputs will be empty
-			return [approvedData, [], []];
-		}
+		// Always return all three outputs for routing
+		return [approvedData, declinedData, changeRequestedData];
 	}
 }
