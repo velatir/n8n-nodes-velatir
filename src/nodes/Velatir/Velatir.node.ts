@@ -48,7 +48,7 @@ export class Velatir implements INodeType {
 				displayName: 'Function Name',
 				name: 'functionName',
 				type: 'string',
-				default: '={{$node.name}}',
+				default: '',
 				description: 'Name shown to approvers (defaults to node name)',
 				placeholder: 'Send Email',
 			},
@@ -94,7 +94,7 @@ export class Velatir implements INodeType {
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
-		const functionName = this.getNodeParameter('functionName', 0) as string;
+		const functionName = (this.getNodeParameter('functionName', 0) as string) || this.getNode().name;
 		const description = this.getNodeParameter('description', 0) as string;
 		const pollingInterval = this.getNodeParameter('pollingInterval', 0) as number;
 		const timeoutMinutes = this.getNodeParameter('timeoutMinutes', 0) as number;
