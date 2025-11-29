@@ -127,10 +127,10 @@ export class Velatir implements INodeType {
 					},
 				};
 
-				// Create the review task request
-				const createResponse = await this.helpers.httpRequest.call(this, {
+				// Create the trace request (new API)
+				const traceResponse = await this.helpers.httpRequest.call(this, {
 					method: 'POST',
-					url: `${credentials.domain}/api/v1/review-tasks`,
+					url: `${credentials.domain}/api/v1/trace`,
 					body: requestBody,
 					json: true,
 					headers: {
@@ -140,27 +140,30 @@ export class Velatir implements INodeType {
 					},
 				});
 
-				// API returns data directly in response body
-				if (!createResponse || !createResponse.reviewTaskId) {
+				// API returns: { traceId, status, processedAsync, reviewTaskId? }
+				if (!traceResponse || !traceResponse.traceId) {
 					throw new NodeOperationError(
 						this.getNode(),
-						`Invalid API response: ${JSON.stringify(createResponse)}`,
+						`Invalid API response: ${JSON.stringify(traceResponse)}`,
 						{ itemIndex: i }
 					);
 				}
 
-				const reviewTaskId = createResponse.reviewTaskId;
-				const initialState = createResponse.state;
+				const traceId = traceResponse.traceId;
+				const traceStatus = traceResponse.status;
+				const reviewTaskId = traceResponse.reviewTaskId;
+				const processedAsync = traceResponse.processedAsync;
 
-				// Check initial state (case insensitive)
-				const normalizedInitialState = initialState.toLowerCase();
-				
-				// If already approved, route to approved output
-				if (normalizedInitialState === 'approved') {
+				// Check trace status for immediate decisions
+				const normalizedTraceStatus = traceStatus.toLowerCase();
+
+				// If immediately approved (Completed status), route to approved output
+				if (normalizedTraceStatus === 'completed') {
 					approvedData.push({
 						json: {
 							...inputData,
 							_velatir: {
+								traceId,
 								reviewTaskId,
 								state: 'approved',
 							}
@@ -170,12 +173,13 @@ export class Velatir implements INodeType {
 					continue;
 				}
 
-				// If rejected, route to declined output
-				if (normalizedInitialState === 'rejected') {
+				// If immediately rejected, route to declined output
+				if (normalizedTraceStatus === 'rejected') {
 					declinedData.push({
 						json: {
 							...inputData,
 							_velatir: {
+								traceId,
 								reviewTaskId,
 								state: 'declined',
 							}
@@ -185,15 +189,15 @@ export class Velatir implements INodeType {
 					continue;
 				}
 
-				// If change requested, route to change requested output
-				if (normalizedInitialState === 'changerequested') {
-					changeRequestedData.push({
+				// If async processing with no workflow (no reviewTaskId), treat as approved
+				if (processedAsync && !reviewTaskId) {
+					approvedData.push({
 						json: {
 							...inputData,
 							_velatir: {
-								reviewTaskId,
-								state: 'change_requested',
-								requestedChange: '',
+								traceId,
+								state: 'approved',
+								processedAsync: true,
 							}
 						},
 						pairedItem: { item: i },
@@ -201,9 +205,19 @@ export class Velatir implements INodeType {
 					continue;
 				}
 
-				// Wait for approval (polling)
+				// If reviewTaskId is present, we need to poll for the human decision
+				if (!reviewTaskId) {
+					// No review task and no immediate decision - treat as error
+					throw new NodeOperationError(
+						this.getNode(),
+						`Unexpected trace status '${traceStatus}' without reviewTaskId`,
+						{ itemIndex: i }
+					);
+				}
+
+				// Wait for approval by polling the review task status
 				let attempts = 0;
-				let finalState = initialState;
+				let finalState = 'pending';
 				let requestedChange = "";
 
 				// Continue polling while in non-final states
@@ -242,6 +256,7 @@ export class Velatir implements INodeType {
 						json: {
 							...inputData,
 							_velatir: {
+								traceId,
 								reviewTaskId,
 								state: 'approved',
 								requestedChange,
@@ -254,6 +269,7 @@ export class Velatir implements INodeType {
 						json: {
 							...inputData,
 							_velatir: {
+								traceId,
 								reviewTaskId,
 								state: 'declined',
 								requestedChange,
@@ -266,6 +282,7 @@ export class Velatir implements INodeType {
 						json: {
 							...inputData,
 							_velatir: {
+								traceId,
 								reviewTaskId,
 								state: 'change_requested',
 								requestedChange,
@@ -280,6 +297,7 @@ export class Velatir implements INodeType {
 							...inputData,
 							error: `Unexpected approval state: ${finalState}`,
 							_velatir: {
+								traceId,
 								reviewTaskId,
 								state: finalState,
 								requestedChange,
