@@ -3,25 +3,11 @@ import {
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
+	IWebhookFunctions,
+	IWebhookResponseData,
 	NodeOperationError,
 	NodeConnectionType,
 } from 'n8n-workflow';
-
-// Utility function to create a delay without using setTimeout directly
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => {
-		const start = Date.now();
-		const check = () => {
-			if (Date.now() - start >= ms) {
-				resolve();
-			} else {
-				// Use setImmediate for non-blocking polling
-				setImmediate(check);
-			}
-		};
-		check();
-	});
-}
 
 export class Velatir implements INodeType {
 	description: INodeTypeDescription = {
@@ -29,106 +15,221 @@ export class Velatir implements INodeType {
 		name: 'velatir',
 		icon: 'file:velatir.svg',
 		group: ['transform'],
-		version: 1,
-		description: 'Human approval gate with decision routing - routes workflow based on approval decision',
+		version: 2,
+		subtitle: 'Send and Wait for Response',
+		description: 'AI compliance and approval workflows',
 		defaults: {
 			name: 'Velatir',
 		},
 		inputs: [NodeConnectionType.Main],
-		outputs: [NodeConnectionType.Main, NodeConnectionType.Main, NodeConnectionType.Main],
-		outputNames: ['Approved', 'Declined', 'Change Requested'],
+		outputs: [NodeConnectionType.Main],
 		credentials: [
 			{
 				name: 'velatirApi',
 				required: true,
 			},
 		],
+		webhooks: [
+			{
+				name: 'default',
+				httpMethod: 'POST',
+				responseMode: 'onReceived',
+				responseData: '',
+				path: '={{ $nodeId }}',
+				restartWebhook: true,
+				isFullPath: true,
+			},
+		],
 		properties: [
 			{
-				displayName: 'Function Name',
-				name: 'functionName',
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				options: [
+					{
+						name: 'Send and Wait for Response',
+						value: 'sendAndWait',
+						action: 'Send trace and wait for response',
+						description: 'Create a trace for assessment and wait for the result',
+					},
+				],
+				default: 'sendAndWait',
+			},
+			{
+				displayName: 'Tool Calls',
+				name: 'toolCalls',
 				type: 'string',
 				default: '',
-				description: 'Name shown to approvers (defaults to node name)',
-				placeholder: 'Send Email',
+				description: 'Comma-separated list of tool names being called',
+				placeholder: 'gmail_send, hubspot_update_contact',
 			},
 			{
-				displayName: 'Description',
-				name: 'description',
+				displayName: 'Arguments',
+				name: 'args',
+				type: 'json',
+				default: '={{ $json }}',
+				description: 'Data to assess (JSON object)',
+			},
+			{
+				displayName: 'Session ID',
+				name: 'sessionId',
 				type: 'string',
 				default: '',
-				description: 'Description of what this step does',
-				placeholder: 'Send welcome email to new customers',
+				description: 'ID to group related traces together. Defaults to n8n execution ID if not provided.',
+				placeholder: 'session_abc123',
 			},
 			{
-				displayName: 'Polling Interval (Seconds)',
-				name: 'pollingInterval',
-				type: 'number',
-				default: 5,
-				description: 'How often to check for approval (seconds)',
-				typeOptions: {
-					minValue: 1,
-					maxValue: 300,
-				},
+				displayName: 'Direction',
+				name: 'direction',
+				type: 'options',
+				options: [
+					{
+						name: 'Inlet',
+						value: 'inlet',
+						description: 'Incoming request/data',
+					},
+					{
+						name: 'Response',
+						value: 'response',
+						description: 'Outgoing response',
+					},
+					{
+						name: 'Signal',
+						value: 'signal',
+						description: 'Internal signal/event',
+					},
+				],
+				default: 'inlet',
+				description: 'Direction of the trace',
 			},
 			{
-				displayName: 'Timeout (Minutes)',
-				name: 'timeoutMinutes',
-				type: 'number',
-				default: 10,
-				description: 'Maximum time to wait for approval (0 for unlimited)',
-				typeOptions: {
-					minValue: 0,
-				},
-			},
-			{
-				displayName: 'LLM Explanation',
-				name: 'llmExplanation',
+				displayName: 'Title',
+				name: 'title',
 				type: 'string',
 				default: '',
-				description: 'Optional explanation from AI about why this approval is needed',
-				placeholder: 'This action requires approval because...',
+				description: 'Custom title for the trace',
+				placeholder: 'Customer onboarding approval',
+			},
+			{
+				displayName: 'Additional Fields',
+				name: 'additionalFields',
+				type: 'collection',
+				placeholder: 'Add Field',
+				default: {},
+				options: [
+					{
+						displayName: 'Metadata',
+						name: 'metadata',
+						type: 'json',
+						default: '{}',
+						description: 'Additional metadata to include',
+					},
+					{
+						displayName: 'Timeout (Minutes)',
+						name: 'timeoutMinutes',
+						type: 'number',
+						default: 20160,
+						description: 'Maximum time to wait for response (default: 14 days)',
+						typeOptions: {
+							minValue: 1,
+						},
+					},
+				],
 			},
 		],
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
-		const functionName = (this.getNodeParameter('functionName', 0) as string) || this.getNode().name;
-		const description = this.getNodeParameter('description', 0) as string;
-		const pollingInterval = this.getNodeParameter('pollingInterval', 0) as number;
-		const timeoutMinutes = this.getNodeParameter('timeoutMinutes', 0) as number;
-		const llmExplanation = this.getNodeParameter('llmExplanation', 0) as string;
+		const returnData: INodeExecutionData[] = [];
+		let requiresWaiting = false;
 
-		// Initialize return data arrays for routing
-		const approvedData: INodeExecutionData[] = [];
-		const declinedData: INodeExecutionData[] = [];
-		const changeRequestedData: INodeExecutionData[] = [];
+		// Check if we're resuming from a webhook callback
+		// When resuming, input data will have approved field from the webhook response
+		const firstItem = items[0]?.json as Record<string, unknown> | undefined;
+		if (firstItem?.approved !== undefined) {
+			// This is a resume from webhook - just pass through the data
+			return [items];
+		}
 
-		const maxAttempts = timeoutMinutes > 0 ? Math.ceil((timeoutMinutes * 60) / pollingInterval) : 0;
+		// Default timeout: 14 days
+		let waitMillis = 14 * 24 * 60 * 60 * 1000;
 
 		for (let i = 0; i < items.length; i++) {
 			try {
-				const inputData = items[i].json;
 				const credentials = await this.getCredentials('velatirApi');
 
-				// Create review task request with input data as arguments
-				const requestBody = {
-					functionName: functionName || `Step ${i + 1}`,
-					args: inputData,
-					doc: description || `Approve data processing in n8n workflow`,
-					llmExplanation: llmExplanation || undefined,
+				// Get parameters
+				const toolCallsStr = this.getNodeParameter('toolCalls', i) as string;
+				const args = this.getNodeParameter('args', i) as object;
+				const sessionId = this.getNodeParameter('sessionId', i) as string;
+				const direction = this.getNodeParameter('direction', i) as string;
+				const title = this.getNodeParameter('title', i) as string;
+				const additionalFields = this.getNodeParameter('additionalFields', i) as {
+					metadata?: string;
+					timeoutMinutes?: number;
+				};
+
+				// Parse tool calls from comma-separated string
+				const toolCalls = toolCallsStr
+					? toolCallsStr.split(',').map((s) => s.trim()).filter(Boolean)
+					: undefined;
+
+				// Parse user metadata
+				let userMetadata: Record<string, unknown> = {};
+				if (additionalFields.metadata) {
+					try {
+						userMetadata = typeof additionalFields.metadata === 'string'
+							? JSON.parse(additionalFields.metadata)
+							: additionalFields.metadata;
+					} catch {
+						// Ignore parse errors, use empty object
+					}
+				}
+
+				// Build request body
+				const requestBody: Record<string, unknown> = {
+					functionName: this.getNode().name,
+					args,
 					metadata: {
-						nodeType: 'n8n-velatir-gate',
-						workflowId: this.getWorkflow().id,
-						executionId: this.getExecutionId(),
-						nodeId: this.getNode().id,
-						itemIndex: i,
+						n8n: {
+							workflowId: this.getWorkflow().id,
+							executionId: this.getExecutionId(),
+							nodeId: this.getNode().id,
+							itemIndex: i,
+						},
+						...userMetadata,
 					},
 				};
 
-				// Create the trace request (new API)
-				const traceResponse = await this.helpers.httpRequest.call(this, {
+				// Add optional fields only if provided
+				if (toolCalls && toolCalls.length > 0) {
+					requestBody.toolCalls = toolCalls;
+				}
+
+				// Use provided sessionId, or default to execution ID to group traces from same workflow run
+				requestBody.sessionId = sessionId || this.getExecutionId();
+
+				if (direction && direction !== 'inlet') {
+					requestBody.direction = direction;
+				}
+				if (title) {
+					requestBody.title = title;
+				}
+
+				// Add webhook URL for callback (used if human intervention needed)
+				const resumeUrl = this.evaluateExpression('{{ $execution?.resumeUrl }}', i) as string;
+				const nodeId = this.evaluateExpression('{{ $nodeId }}', i) as string;
+				requestBody.webhookUrl = `${resumeUrl}/${nodeId}`;
+
+				// Set timeout from additional fields
+				if (additionalFields.timeoutMinutes) {
+					waitMillis = additionalFields.timeoutMinutes * 60 * 1000;
+				}
+
+				// Create the trace
+				const response = await this.helpers.httpRequest({
 					method: 'POST',
 					url: `${credentials.domain}/api/v1/trace`,
 					body: requestBody,
@@ -140,182 +241,90 @@ export class Velatir implements INodeType {
 					},
 				});
 
-				// API returns: { traceId, status, processedAsync, reviewTaskId? }
-				if (!traceResponse || !traceResponse.traceId) {
+				// Validate response
+				if (!response || !response.traceId) {
 					throw new NodeOperationError(
 						this.getNode(),
-						`Invalid API response: ${JSON.stringify(traceResponse)}`,
+						`Invalid API response: ${JSON.stringify(response)}`,
 						{ itemIndex: i }
 					);
 				}
 
-				const traceId = traceResponse.traceId;
-				const traceStatus = traceResponse.status;
-				const reviewTaskId = traceResponse.reviewTaskId;
-				const processedAsync = traceResponse.processedAsync;
+				const { traceId, status, processedAsync, reviewTaskId } = response;
+				const normalizedStatus = status?.toLowerCase();
 
-				// Check trace status for immediate decisions
-				const normalizedTraceStatus = traceStatus.toLowerCase();
-
-				// If immediately approved (Completed status), route to approved output
-				if (normalizedTraceStatus === 'completed') {
-					approvedData.push({
+				// Case 1: No workflows configured - queued for async assessment, proceed immediately
+				if (processedAsync === true) {
+					returnData.push({
 						json: {
-							...inputData,
-							_velatir: {
-								traceId,
-								reviewTaskId,
-								state: 'approved',
-							}
+							approved: true,
+							state: 'approved',
+							traceId,
+							processedAsync: true,
 						},
 						pairedItem: { item: i },
 					});
 					continue;
 				}
 
-				// If immediately rejected, route to declined output
-				if (normalizedTraceStatus === 'rejected') {
-					declinedData.push({
+				// Case 2: Completed - approved by workflow
+				if (normalizedStatus === 'completed') {
+					returnData.push({
 						json: {
-							...inputData,
-							_velatir: {
-								traceId,
-								reviewTaskId,
-								state: 'declined',
-							}
+							approved: true,
+							state: 'approved',
+							traceId,
 						},
 						pairedItem: { item: i },
 					});
 					continue;
 				}
 
-				// If async processing with no workflow (no reviewTaskId), treat as approved
-				if (processedAsync && !reviewTaskId) {
-					approvedData.push({
-						json: {
-							...inputData,
-							_velatir: {
-								traceId,
-								state: 'approved',
-								processedAsync: true,
-							}
-						},
-						pairedItem: { item: i },
-					});
-					continue;
-				}
-
-				// If reviewTaskId is present, we need to poll for the human decision
-				if (!reviewTaskId) {
-					// No review task and no immediate decision - treat as error
+				// Case 3: Rejected - blocked by workflow
+				if (normalizedStatus === 'rejected') {
 					throw new NodeOperationError(
 						this.getNode(),
-						`Unexpected trace status '${traceStatus}' without reviewTaskId`,
+						'Request was rejected by policy',
 						{ itemIndex: i }
 					);
 				}
 
-				// Wait for approval by polling the review task status
-				let attempts = 0;
-				let finalState = 'pending';
-				let requestedChange = "";
-
-				// Continue polling while in non-final states
-				while (['pending', 'processing', 'requiresintervention'].includes(finalState.toLowerCase())) {
-					if (maxAttempts > 0 && attempts >= maxAttempts) {
-						throw new NodeOperationError(
-							this.getNode(),
-							`Approval timeout after ${timeoutMinutes} minutes (reviewTaskId: ${reviewTaskId})`,
-							{ itemIndex: i }
-						);
-					}
-
-					// Wait before next poll
-					await delay(pollingInterval * 1000);
-					attempts++;
-
-					// Check status
-					const statusResponse = await this.helpers.httpRequest.call(this, {
-						method: 'GET',
-						url: `${credentials.domain}/api/v1/review-tasks/${reviewTaskId}`,
-						json: true,
-						headers: {
-							'X-API-Key': credentials.apiKey as string,
-							'Accept': 'application/json',
+				// Case 4: Assessed with reviewTaskId - requires human intervention, wait for webhook
+				if (normalizedStatus === 'assessed' && reviewTaskId) {
+					requiresWaiting = true;
+					returnData.push({
+						json: {
+							state: 'pending',
+							traceId,
+							reviewTaskId,
 						},
+						pairedItem: { item: i },
 					});
-
-					finalState = statusResponse.state;
-					requestedChange = statusResponse.requestedChange ?? "";
+					continue;
 				}
 
-				// Handle final decision by routing to appropriate output (case insensitive)
-				const normalizedState = finalState.toLowerCase();
-				if (normalizedState === 'approved') {
-					approvedData.push({
-						json: {
-							...inputData,
-							_velatir: {
-								traceId,
-								reviewTaskId,
-								state: 'approved',
-								requestedChange,
-							}
-						},
-						pairedItem: { item: i },
-					});
-				} else if (normalizedState === 'rejected') {
-					declinedData.push({
-						json: {
-							...inputData,
-							_velatir: {
-								traceId,
-								reviewTaskId,
-								state: 'declined',
-								requestedChange,
-							}
-						},
-						pairedItem: { item: i },
-					});
-				} else if (normalizedState === 'changerequested') {
-					changeRequestedData.push({
-						json: {
-							...inputData,
-							_velatir: {
-								traceId,
-								reviewTaskId,
-								state: 'change_requested',
-								requestedChange,
-							}
-						},
-						pairedItem: { item: i },
-					});
-				} else {
-					// Handle any other unexpected states by logging and routing to declined
-					declinedData.push({
-						json: {
-							...inputData,
-							error: `Unexpected approval state: ${finalState}`,
-							_velatir: {
-								traceId,
-								reviewTaskId,
-								state: finalState,
-								requestedChange,
-							}
-						},
-						pairedItem: { item: i },
-					});
+				// Fallback: Unknown state, treat as needing to wait if reviewTaskId present
+				if (reviewTaskId) {
+					requiresWaiting = true;
 				}
+				const fallbackApproved = !reviewTaskId;
+				returnData.push({
+					json: {
+						approved: fallbackApproved,
+						state: reviewTaskId ? 'pending' : 'approved',
+						traceId,
+						reviewTaskId,
+					},
+					pairedItem: { item: i },
+				});
 
 			} catch (error) {
 				if (this.continueOnFail()) {
-					// Route errors to declined output
-					declinedData.push({
-						json: { 
+					returnData.push({
+						json: {
+							approved: false,
+							state: 'error',
 							error: error instanceof Error ? error.message : 'Unknown error',
-							_velatir: {
-								state: 'error',
-							}
 						},
 						pairedItem: { item: i },
 					});
@@ -325,7 +334,38 @@ export class Velatir implements INodeType {
 			}
 		}
 
-		// Always return all three outputs for routing
-		return [approvedData, declinedData, changeRequestedData];
+		// If any item requires waiting for human intervention, pause execution
+		if (requiresWaiting) {
+			const waitTill = new Date(Date.now() + waitMillis);
+			await this.putExecutionToWait(waitTill);
+			return [this.getInputData()];
+		}
+
+		// All items resolved immediately, return results
+		return [returnData];
 	}
+
+	webhook = async function (this: IWebhookFunctions): Promise<IWebhookResponseData> {
+		const bodyData = this.getBodyData() as {
+			state?: string;
+			traceId?: string;
+			reviewTaskId?: string;
+			requestedChange?: string;
+		};
+
+		const state = bodyData.state?.toLowerCase() || 'approved';
+		// approved = true only for "approved" state
+		// changerequested and rejected both mean not approved
+		const approved = state === 'approved';
+
+		return {
+			workflowData: [this.helpers.returnJsonArray({
+				approved,
+				state,
+				traceId: bodyData.traceId,
+				reviewTaskId: bodyData.reviewTaskId,
+				requestedChange: bodyData.requestedChange,
+			})],
+		};
+	};
 }

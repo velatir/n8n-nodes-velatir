@@ -1,0 +1,14 @@
+{
+	"node": "n8n-nodes-velatir.velatir",
+	"nodeVersion": "2.0",
+	"codexVersion": "1.0",
+	"categories": ["Communication", "HITL"],
+	"resources": {
+		"primaryDocumentation": [
+			{
+				"url": "https://docs.velatir.com/integrations/n8n-node"
+			}
+		]
+	},
+	"alias": ["approval", "compliance", "guardrail", "ai", "trace", "policy"]
+}
